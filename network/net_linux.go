@@ -92,8 +92,17 @@ func iwlistSupportedFrequencies(iface string) ([]int, error) {
 
 var iwPhyParser = regexp.MustCompile(`^\s*wiphy\s+(\d+)$`)
 
-// var iwFreqParser = regexp.MustCompile(`^\s+\*\s+(\d+)\s+MHz.+dBm.+$`)
-var iwFreqParser = regexp.MustCompile(`^\s+\*\s+(\d+)\.\d+\s+MHz.+dBm.+$`)
+// Decimal part made optional (was `(\d+)\.\d+`, unconditionally requiring
+// e.g. "2412.0 MHz") -- this device's `iw` build prints frequencies with no
+// decimal point at all ("2412 MHz"), so the strict version matched zero
+// lines, every single time, on every `wifi.recon clear` (which pwnagotchi
+// calls once per epoch). GetSupportedFrequencies() came back permanently
+// empty, so the hopper never had any channels to hop to and silently sat
+// on whatever channel it started on (1) for the device's entire uptime --
+// see pwndroid notes/06-pwnagotchi-port.md. `(?:\.\d+)?` accepts both
+// "2412 MHz" and "2412.0 MHz" so this doesn't regress whichever format an
+// installer's `iw` build actually happens to use.
+var iwFreqParser = regexp.MustCompile(`^\s+\*\s+(\d+)(?:\.\d+)?\s+MHz.+dBm.+$`)
 
 func iwSupportedFrequencies(iface string) ([]int, error) {
 	// first determine phy index
