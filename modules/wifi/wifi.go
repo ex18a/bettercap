@@ -651,18 +651,38 @@ func (mod *WiFiModule) Configure() error {
 		opts.Timeout = 500 * time.Millisecond
 		opts.Monitor = true
 
+		channelRetries := 0
+		const maxChannelRetries = 5
+
 		for retry := 0; ; retry++ {
 			if mod.handle, err = network.CaptureWithOptions(ifName, opts); err == nil {
 				// we're done
 				break
-			} else if retry == 0 && err.Error() == ErrIfaceNotUp {
+			}
+			mod.Debug("wifi interface activation attempt %d (monitor=%v) failed: %s", retry, opts.Monitor, err.Error())
+			if retry == 0 && err.Error() == ErrIfaceNotUp {
 				// try to bring interface up and try again
 				mod.Info("interface %s is down, bringing it up ...", ifName)
 				if err := network.ActivateInterface(ifName); err != nil {
 					return err
 				}
+				// Confirmed live on a con_mode=4 driver (Mi Mix 3): the
+				// interface can be administratively up, of monitor type,
+				// and still fail pcap_activate() with "Interface Not Up"
+				// forever, on every retry path (including the
+				// ForceMonitorMode one below), unless a channel has
+				// actually been tuned on it at least once. Neither
+				// ActivateInterface() (ifconfig up) nor ForceMonitorMode()
+				// (down/set type monitor/up) ever does this on their own
+				// -- channel hopping only starts *after* this activation
+				// loop succeeds, so without this, the loop can never
+				// succeed in the first place on this class of driver.
+				// Harmless no-op setup step on drivers that don't need it.
+				if err := network.SetInterfaceChannel(ifName, 1); err != nil {
+					mod.Debug("could not pre-tune %s to a channel: %v", ifName, err)
+				}
 				continue
-			} else if !opts.Monitor {
+			} else if !opts.Monitor && channelRetries >= maxChannelRetries {
 				// second fatal error, just bail
 				return fmt.Errorf("error while activating handle: %s", err)
 			} else {
@@ -672,6 +692,25 @@ func (mod *WiFiModule) Configure() error {
 				if err := network.ForceMonitorMode(ifName); err != nil {
 					return err
 				}
+				// Bypass SetInterfaceChannel's own "already on this
+				// channel" cache -- it's a no-op after the first real call
+				// here, but this driver seems to need the actual iw
+				// command re-issued on every retry, not just once.
+				network.SetInterfaceCurrentChannel(ifName, network.NO_CHANNEL)
+				if err := network.SetInterfaceChannel(ifName, 1); err != nil {
+					mod.Debug("could not pre-tune %s to a channel: %v", ifName, err)
+				}
+				// Confirmed live on a con_mode=4 driver (Mi Mix 3): setting
+				// the channel doesn't take effect instantly at the kernel
+				// level -- retrying pcap_activate() immediately afterward
+				// (no delay) still hits "Interface Not Up" every time; a
+				// short settle delay plus a couple of extra retries (not
+				// just the one this loop already gave every other error
+				// path) reliably clears it. Every manual reproduction of
+				// this exact sequence succeeded once a brief pause was
+				// added here.
+				time.Sleep(3 * time.Second)
+				channelRetries++
 			}
 		}
 	}
